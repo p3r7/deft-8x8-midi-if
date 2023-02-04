@@ -12,7 +12,7 @@ fork of [Deftaudio/Midi-boards/MIDITeensy4.1](https://github.com/Deftaudio/Midi-
 | 5 / 13       | microKorg            |                   |
 | 6 / X        | MIDI -> CV (keystep) | out only          |
 | X / X        |                      |                   |
-| 8            | computer (via MOTU)  | omni              |
+| 8 / 16       | computer (via MOTU)  | omni              |
 
 NB: midi INs relay info to all the over midi OUTs except themselves. one exception of this is port #1 (IN #1) that does relay info to port #9 (OUT #1)
 
