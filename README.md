@@ -5,7 +5,7 @@ fork of [Deftaudio/Midi-boards/MIDITeensy4.1](https://github.com/Deftaudio/Midi-
 | port #       | device               | comment           |
 |--------------|----------------------|-------------------|
 | USB (master) | norns                | omni              |
-| 1 / X        | master keyboard      | in only, omni     |
+| X / 9        | master keyboard      | in only, omni     |
 | 2 / 10       | MPC                  | omni except sysex |
 | 3 / 11       | Waldorf uQ           |                   |
 | 4 / 12       | Waldorf Pulse        |                   |
@@ -18,7 +18,7 @@ NB: midi INs relay info to all the over midi OUTs except themselves. one excepti
 
 also, port #14 (IN #6) is dead. issue seems to be at the level of the teensy board (damage while soldering pins?). that's why MIDI->CV got set here (asymmetric).
 
-if i ever fix this port #14, could be good to move MIDI->CV on port #9 so that a whole column would be free.
+if i ever fix this port #14, could be good to move MIDI->CV on port #1 so that a whole column would be free.
 
 
 # next steps
