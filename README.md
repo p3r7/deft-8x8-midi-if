@@ -2,6 +2,8 @@
 fork of [Deftaudio/Midi-boards/MIDITeensy4.1](https://github.com/Deftaudio/Midi-boards/tree/master/MIDITeensy4.1).
 
 
+## config
+
 | port #       | device               | comment           |
 |--------------|----------------------|-------------------|
 | USB (master) | norns                | omni              |
@@ -21,7 +23,16 @@ also, port #14 (IN #6) is dead. issue seems to be at the level of the teensy boa
 if i ever fix this port #14, could be good to move MIDI->CV on port #1 so that a whole column would be free.
 
 
-# next steps
+## installation
+
+as the midi interface is housed in a ruggued enclosure, the reset buttonis not physically accessible.
+
+thanksfully, [teesny_loader_cli](https://www.pjrc.com/teensy/loader_cli.html) can send a soft reboot command:
+
+    $ teensy_loader_cli --mcu=TEENSY41 eigen_8x8.ino.hex -vs
+
+
+## next steps
 
  - [ ] allow switching w/ sysex between several pre-configured profiles. notably omni (current) & segmented
  - [ ] for segmented mode, make each device use its own channel set at BUS level (eg IN/OUT #2 is channel 2...)
