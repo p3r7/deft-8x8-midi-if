@@ -31,6 +31,8 @@ thanksfully, [teesny_loader_cli](https://www.pjrc.com/teensy/loader_cli.html) ca
 
     $ teensy_loader_cli --mcu=TEENSY41 eigen_8x8.ino.hex -vs
 
+be sure to unplug any other teensy-based device (neotrellis grid, 16n...) while doing so.
+
 
 ## next steps
 
