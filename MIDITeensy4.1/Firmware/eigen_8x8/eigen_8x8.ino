@@ -1,9 +1,14 @@
-/* Create a "class compliant " USB to 3 MIDI IN and 3 MIDI OUT interface.
+/* Create a "class compliant " USB to 8 MIDI IN and 8 MIDI OUT interface.
+
+   Teensy 4.1
 
    MIDI receive (6N138 optocoupler) input circuit and series resistor
-   outputs need to be connected to Serial1, Serial2 and Serial3.
 
-   You must select MIDIx4 from the "Tools > USB Type" menu
+   You must select "Serial + MIDI" from the "Tools > USB Type" menu
+
+   NB: can also use "Serial + MIDIx16" to get 16 virtual interfaces
+   the selected interface is retrieved w/ `usbMIDI.getCable` and allows having different cnfs for each virtualInterface
+   this is similar to midihub's beahviour
 
    This example code is in the public domain.
 */
@@ -15,10 +20,86 @@
 // - IN/OUT8 is computer -> omni
 // TODO: expose 2nd USB port to all other devices (+ ideally as additional USB devices)
 
+// device -> USB
+// 1 OK
+// 2 KO -> bug or interface dead?, most likely 2nd opt
+// 3 OK
+// 4 OK
+// 5 OK
+// 6 KO -> known issue, likely a buggy teensy
+// 7 OK
+// 8 OK
+
+
+// ------------------------------------------------------------------------
 
 #include <MIDI.h>
 #include <USBHost_t36.h> // access to USB MIDI devices (plugged into 2nd USB port)
 
+
+// ------------------------------------------------------------------------
+// CONSTS
+
+#define SERIAL_BAUDS 115200
+#define LED_PIN 13
+
+#define NB_MIDI 8
+
+
+// ------------------------------------------------------------------------
+// STATE - CONF
+
+const uint8_t OMNI_ROUTE_CHANNEL = 16;
+
+// to prevent self-echoing messages
+boolean areInOutSameDev[] = { false, true, true, true,
+                              true, true, true, true };
+
+// only controllers can send notes, CC & PGM change to all devices
+// sequencers also go in this category
+
+// only librarian devices can receive sysex & CC from all devices
+// this is to prevent spamming sysex on all interfaces
+
+#define M_DEVICE      2
+#define M_CONTROLLER  4
+#define M_LIBRARIAN   8
+
+uint8_t mode[] = { M_CONTROLLER, M_CONTROLLER, M_DEVICE, M_DEVICE,
+                   M_DEVICE, M_DEVICE, M_DEVICE, M_CONTROLLER | M_LIBRARIAN};
+
+#define CH_M_EXPOSED  0 // channel exposed by interface
+#define CH_M_DEVICE   1 // channel device listens to
+
+// this conf allows remapping sent/received channels for each port
+// this allows binding a dedicated one to each device wo/ having to temper w/ their config
+boolean doChannelRemap[] = { false, false, false, false,
+                             false, false, false, false};
+uint8_t channelRemap[][2] = { {1, 1}, {2, 1}, {3, 1}, {4, 1},
+                              {5, 1}, {6, 1}, {7, 1}, {8, 1}};
+
+// - IN1 is master keyboard -> omni
+// - IN/OUT2 is MPC -> omni
+// - 3/4/5/6/7 are vanilla
+// - 8 is computer -> send sysex
+
+boolean isController (int midi_id) {
+  return (mode[midi_id] & M_CONTROLLER) > 0;
+}
+
+boolean isLibrarian (int midi_id) {
+  return (mode[midi_id] & M_LIBRARIAN) > 0;
+}
+
+// ------------------------------------------------------------------------
+// STATE (MEMORY)
+
+// A variable to know how long the LED has been turned on
+elapsedMillis ledOnMillis;
+
+
+// ------------------------------------------------------------------------
+// INIT
 
 // Create the Serial MIDI ports
 MIDI_CREATE_INSTANCE(HardwareSerial, Serial1, MIDI1);
@@ -30,6 +111,9 @@ MIDI_CREATE_INSTANCE(HardwareSerial, Serial6, MIDI6);
 MIDI_CREATE_INSTANCE(HardwareSerial, Serial7, MIDI7);
 MIDI_CREATE_INSTANCE(HardwareSerial, Serial8, MIDI8);
 
+
+midi::MidiInterface<midi::SerialMIDI<HardwareSerial> > m[]={ MIDI1, MIDI2, MIDI3, MIDI4,
+                                                             MIDI5, MIDI6, MIDI7, MIDI8 };
 
 // Create the ports for USB devices plugged into Teensy's 2nd USB port (via hubs)
 USBHost myusb;
@@ -45,348 +129,104 @@ MIDIDevice midi05(myusb);
 MIDIDevice midi06(myusb);
 MIDIDevice midi07(myusb);
 MIDIDevice midi08(myusb);
-MIDIDevice * midilist[8] = {
-  &midi01, &midi02, &midi03, &midi04, &midi05, &midi06, &midi07, &midi08,
-};
-
-
-// A variable to know how long the LED has been turned on
-elapsedMillis ledOnMillis;
+MIDIDevice * midilist[8] = { &midi01, &midi02, &midi03, &midi04,
+                             &midi05, &midi06, &midi07, &midi08 };
 
 
 void setup() {
-  Serial.begin(115200);
-  pinMode(13, OUTPUT); // LED pin
-  MIDI1.begin(MIDI_CHANNEL_OMNI);
-  MIDI2.begin(MIDI_CHANNEL_OMNI);
-  MIDI3.begin(MIDI_CHANNEL_OMNI);
-  MIDI4.begin(MIDI_CHANNEL_OMNI);
-  MIDI5.begin(MIDI_CHANNEL_OMNI);
-  MIDI6.begin(MIDI_CHANNEL_OMNI);
-  MIDI7.begin(MIDI_CHANNEL_OMNI);
-  MIDI8.begin(MIDI_CHANNEL_OMNI);
-  MIDI1.turnThruOff();
-  MIDI2.turnThruOff();
-  MIDI3.turnThruOff();
-  MIDI4.turnThruOff();
-  MIDI5.turnThruOff();
-  MIDI6.turnThruOff();
-  MIDI7.turnThruOff();
-  MIDI8.turnThruOff();
+  Serial.begin(SERIAL_BAUDS);
+  pinMode(LED_PIN, OUTPUT); // LED pin
 
-    digitalWriteFast(13, HIGH); // LED on
-    delay(500);
-    digitalWriteFast(13, LOW);
+  for (int i=0 ; i < NB_MIDI ; i++) {
+    m[i].begin(MIDI_CHANNEL_OMNI);
+    m[i].turnThruOff();
+  }
+
+  digitalWriteFast(LED_PIN, HIGH); // LED on
+  delay(500);
+  digitalWriteFast(LED_PIN, LOW);
 
   myusb.begin();
-
 }
 
+
+// ------------------------------------------------------------------------
+// MAIN
 
 void loop() {
   bool activity = false;
 
-  // NB: IN1 is master keyboard -> omni
-  if (MIDI1.read()) {
-    // get a MIDI IN1 (Serial) message
-    byte type = MIDI1.getType();
-    byte channel = MIDI1.getChannel();
-    byte data1 = MIDI1.getData1();
-    byte data2 = MIDI1.getData2();
+  // serial midi ports
+  for (int i=0 ; i < NB_MIDI ; i++) {
+    if (m[i].read()) {
+      byte type    = m[i].getType();
+      byte channel = m[i].getChannel();
+      byte data1   = m[i].getData1();
+      byte data2   = m[i].getData2();
 
-    // forward the message to USB MIDI virtual cable #0
-    if (type != midi::SystemExclusive) {
-      // Normal messages, simply give the data to the usbMIDI.send()
-      usbMIDI.send(type, data1, data2, channel, 0);
-      MIDI1.send(type, data1, data2, channel);
-      MIDI2.send(type, data1, data2, channel);
-      MIDI3.send(type, data1, data2, channel);
-      MIDI4.send(type, data1, data2, channel);
-      MIDI5.send(type, data1, data2, channel);
-      MIDI6.send(type, data1, data2, channel);
-      MIDI7.send(type, data1, data2, channel);
-      MIDI8.send(type, data1, data2, channel);
+      if (type != midi::SystemExclusive) {
+        midi::MidiType mtype = (midi::MidiType)type;
+        byte mappedChannel = channel;
 
-    } else {
-      // SysEx messages are special.  The message length is given in data1 & data2
-      unsigned int SysExLength = data1 + data2 * 256;
-      usbMIDI.sendSysEx(SysExLength, MIDI1.getSysExArray(), true, 0);
-      // MIDI1.sendSysEx(SysExLength, MIDI1.getSysExArray(), true);
-      // MIDI2.sendSysEx(SysExLength, MIDI1.getSysExArray(), true);
-      // MIDI3.sendSysEx(SysExLength, MIDI1.getSysExArray(), true);
-      // MIDI4.sendSysEx(SysExLength, MIDI1.getSysExArray(), true);
-      // MIDI5.sendSysEx(SysExLength, MIDI1.getSysExArray(), true);
-      // MIDI6.sendSysEx(SysExLength, MIDI1.getSysExArray(), true);
-      // MIDI7.sendSysEx(SysExLength, MIDI1.getSysExArray(), true);
-      MIDI8.sendSysEx(SysExLength, MIDI1.getSysExArray(), true);
+        usbMIDI.send(type, data1, data2, channel, 0);
 
+        for (int o=0 ; o < NB_MIDI ; o++) {
+          mappedChannel = channel;
+
+          // don't self-echo
+          if (o == i && areInOutSameDev[i]) {
+            continue;
+          }
+
+          // only controllers can send to other devices
+          // w/ exception of librarians that receive from any device
+          if (! (isController(i) || isLibrarian(o))) {
+            continue;
+          }
+
+          if (isController(i)) {
+            if (isLibrarian(o)) {
+              // -> be transparent
+            } else {
+              // -> filter/remap according to dest device (o)
+              if (channel == OMNI_ROUTE_CHANNEL
+                  || channel == channelRemap[o][CH_M_EXPOSED]) {
+                mappedChannel = channelRemap[o][CH_M_DEVICE];
+              } else {
+                // filter out
+                continue;
+              }
+            }
+          } else {
+            // -> remap according to source device (i)
+            mappedChannel = channelRemap[i][CH_M_EXPOSED];
+          }
+
+          m[o].send(mtype, data1, data2, mappedChannel);
+        }
+      } else {
+        unsigned int SysExLength = data1 + data2 * 256;
+        usbMIDI.sendSysEx(SysExLength, m[i].getSysExArray(), true, 0);
+        for (int o=0 ; o < NB_MIDI ; o++) {
+          if (o == i && areInOutSameDev[i]) { // don't self-echo sysex
+            continue;
+          }
+
+          // librarians can send sysed to any device and receive from all
+          if (! (isLibrarian(i) || isLibrarian(o))) {
+            continue;
+          }
+
+          m[o].sendSysEx(SysExLength, m[i].getSysExArray(), true);
+        }
+      }
+
+      activity = true;
     }
-    activity = true;
   }
 
-  // NB: IN/OUT2 is MPC -> omni
-  if (MIDI2.read()) {
-    // get a MIDI IN2 (Serial) message
-    byte type = MIDI2.getType();
-    byte channel = MIDI2.getChannel();
-    byte data1 = MIDI2.getData1();
-    byte data2 = MIDI2.getData2();
-
-    // forward the message to USB MIDI virtual cable #1
-    if (type != midi::SystemExclusive) {
-      // Normal messages, simply give the data to the usbMIDI.send()
-      usbMIDI.send(type, data1, data2, channel, 0);
-      MIDI1.send(type, data1, data2, channel);
-      // MIDI2.send(type, data1, data2, channel);
-      MIDI3.send(type, data1, data2, channel);
-      MIDI4.send(type, data1, data2, channel);
-      MIDI5.send(type, data1, data2, channel);
-      MIDI6.send(type, data1, data2, channel);
-      MIDI7.send(type, data1, data2, channel);
-      MIDI8.send(type, data1, data2, channel);
-
-    } else {
-      // SysEx messages are special.  The message length is given in data1 & data2
-      unsigned int SysExLength = data1 + data2 * 256;
-      usbMIDI.sendSysEx(SysExLength, MIDI2.getSysExArray(), true, 0);
-      // MIDI1.sendSysEx(SysExLength, MIDI2.getSysExArray(), true);
-      // MIDI2.sendSysEx(SysExLength, MIDI2.getSysExArray(), true);
-      // MIDI3.sendSysEx(SysExLength, MIDI2.getSysExArray(), true);
-      // MIDI4.sendSysEx(SysExLength, MIDI2.getSysExArray(), true);
-      // MIDI5.sendSysEx(SysExLength, MIDI2.getSysExArray(), true);
-      // MIDI6.sendSysEx(SysExLength, MIDI2.getSysExArray(), true);
-      // MIDI7.sendSysEx(SysExLength, MIDI2.getSysExArray(), true);
-      MIDI8.sendSysEx(SysExLength, MIDI2.getSysExArray(), true);
-
-    }
-    activity = true;
-  }
-
-  if (MIDI3.read()) {
-    // get a MIDI IN1 (Serial) message
-    byte type = MIDI3.getType();
-    byte channel = MIDI3.getChannel();
-    byte data1 = MIDI3.getData1();
-    byte data2 = MIDI3.getData2();
-
-    // forward the message to USB MIDI virtual cable #0
-    if (type != midi::SystemExclusive) {
-      // Normal messages, simply give the data to the usbMIDI.send()
-      usbMIDI.send(type, data1, data2, channel, 0);
-      // MIDI1.send(type, data1, data2, channel);
-      MIDI2.send(type, data1, data2, channel);
-      // MIDI3.send(type, data1, data2, channel);
-      // MIDI4.send(type, data1, data2, channel);
-      // MIDI5.send(type, data1, data2, channel);
-      // MIDI6.send(type, data1, data2, channel);
-      // MIDI7.send(type, data1, data2, channel);
-      // MIDI8.send(type, data1, data2, channel);
-
-    } else {
-      // SysEx messages are special.  The message length is given in data1 & data2
-      unsigned int SysExLength = data1 + data2 * 256;
-      usbMIDI.sendSysEx(SysExLength, MIDI3.getSysExArray(), true, 0);
-      // MIDI1.sendSysEx(SysExLength, MIDI3.getSysExArray(), true);
-      // MIDI2.sendSysEx(SysExLength, MIDI3.getSysExArray(), true);
-      // MIDI3.sendSysEx(SysExLength, MIDI3.getSysExArray(), true);
-      // MIDI4.sendSysEx(SysExLength, MIDI3.getSysExArray(), true);
-      // MIDI5.sendSysEx(SysExLength, MIDI3.getSysExArray(), true);
-      // MIDI6.sendSysEx(SysExLength, MIDI3.getSysExArray(), true);
-      // MIDI7.sendSysEx(SysExLength, MIDI3.getSysExArray(), true);
-      MIDI8.sendSysEx(SysExLength, MIDI3.getSysExArray(), true);
-
-    }
-    activity = true;
-  }
-
-  if (MIDI4.read()) {
-    // get a MIDI IN1 (Serial) message
-    byte type = MIDI4.getType();
-    byte channel = MIDI4.getChannel();
-    byte data1 = MIDI4.getData1();
-    byte data2 = MIDI4.getData2();
-
-    // forward the message to USB MIDI virtual cable #0
-    if (type != midi::SystemExclusive) {
-      // Normal messages, simply give the data to the usbMIDI.send()
-      usbMIDI.send(type, data1, data2, channel, 0);
-      // MIDI1.send(type, data1, data2, channel);
-      // MIDI2.send(type, data1, data2, channel);
-      // MIDI3.send(type, data1, data2, channel);
-      // MIDI4.send(type, data1, data2, channel);
-      // MIDI5.send(type, data1, data2, channel);
-      // MIDI6.send(type, data1, data2, channel);
-      // MIDI7.send(type, data1, data2, channel);
-      MIDI8.send(type, data1, data2, channel);
-
-    } else {
-      // SysEx messages are special.  The message length is given in data1 & data2
-      unsigned int SysExLength = data1 + data2 * 256;
-      usbMIDI.sendSysEx(SysExLength, MIDI4.getSysExArray(), true, 0);
-      // MIDI1.sendSysEx(SysExLength, MIDI4.getSysExArray(), true);
-      // MIDI2.sendSysEx(SysExLength, MIDI4.getSysExArray(), true);
-      // MIDI3.sendSysEx(SysExLength, MIDI4.getSysExArray(), true);
-      // MIDI4.sendSysEx(SysExLength, MIDI4.getSysExArray(), true);
-      // MIDI5.sendSysEx(SysExLength, MIDI4.getSysExArray(), true);
-      // MIDI6.sendSysEx(SysExLength, MIDI4.getSysExArray(), true);
-      // MIDI7.sendSysEx(SysExLength, MIDI4.getSysExArray(), true);
-      MIDI8.sendSysEx(SysExLength, MIDI4.getSysExArray(), true);
-
-    }
-    activity = true;
-  }
-
-  if (MIDI5.read()) {
-    // get a MIDI IN1 (Serial) message
-    byte type = MIDI5.getType();
-    byte channel = MIDI5.getChannel();
-    byte data1 = MIDI5.getData1();
-    byte data2 = MIDI5.getData2();
-
-    // forward the message to USB MIDI virtual cable #0
-    if (type != midi::SystemExclusive) {
-      // Normal messages, simply give the data to the usbMIDI.send()
-      usbMIDI.send(type, data1, data2, channel, 0);
-      // MIDI1.send(type, data1, data2, channel);
-      // MIDI2.send(type, data1, data2, channel);
-      // MIDI3.send(type, data1, data2, channel);
-      // MIDI4.send(type, data1, data2, channel);
-      // MIDI5.send(type, data1, data2, channel);
-      // MIDI6.send(type, data1, data2, channel);
-      // MIDI7.send(type, data1, data2, channel);
-      MIDI8.send(type, data1, data2, channel);
-
-    } else {
-      // SysEx messages are special.  The message length is given in data1 & data2
-      unsigned int SysExLength = data1 + data2 * 256;
-      usbMIDI.sendSysEx(SysExLength, MIDI5.getSysExArray(), true, 0);
-      // MIDI1.sendSysEx(SysExLength, MIDI5.getSysExArray(), true);
-      // MIDI2.sendSysEx(SysExLength, MIDI5.getSysExArray(), true);
-      // MIDI3.sendSysEx(SysExLength, MIDI5.getSysExArray(), true);
-      // MIDI4.sendSysEx(SysExLength, MIDI5.getSysExArray(), true);
-      // MIDI5.sendSysEx(SysExLength, MIDI5.getSysExArray(), true);
-      // MIDI6.sendSysEx(SysExLength, MIDI5.getSysExArray(), true);
-      // MIDI7.sendSysEx(SysExLength, MIDI5.getSysExArray(), true);
-      MIDI8.sendSysEx(SysExLength, MIDI5.getSysExArray(), true);
-
-    }
-    activity = true;
-  }
-
-  if (MIDI6.read()) {
-    // get a MIDI IN1 (Serial) message
-    byte type = MIDI6.getType();
-    byte channel = MIDI6.getChannel();
-    byte data1 = MIDI6.getData1();
-    byte data2 = MIDI6.getData2();
-
-    // forward the message to USB MIDI virtual cable #0
-    if (type != midi::SystemExclusive) {
-      // Normal messages, simply give the data to the usbMIDI.send()
-      usbMIDI.send(type, data1, data2, channel, 0);
-      // MIDI1.send(type, data1, data2, channel);
-      // MIDI2.send(type, data1, data2, channel);
-      // MIDI3.send(type, data1, data2, channel);
-      // MIDI4.send(type, data1, data2, channel);
-      // MIDI5.send(type, data1, data2, channel);
-      // MIDI6.send(type, data1, data2, channel);
-      // MIDI7.send(type, data1, data2, channel);
-      MIDI8.send(type, data1, data2, channel);
-
-    } else {
-      // SysEx messages are special.  The message length is given in data1 & data2
-      unsigned int SysExLength = data1 + data2 * 256;
-      usbMIDI.sendSysEx(SysExLength, MIDI6.getSysExArray(), true, 0);
-      // MIDI1.sendSysEx(SysExLength, MIDI6.getSysExArray(), true);
-      // MIDI2.sendSysEx(SysExLength, MIDI6.getSysExArray(), true);
-      // MIDI3.sendSysEx(SysExLength, MIDI6.getSysExArray(), true);
-      // MIDI4.sendSysEx(SysExLength, MIDI6.getSysExArray(), true);
-      // MIDI5.sendSysEx(SysExLength, MIDI6.getSysExArray(), true);
-      // MIDI6.sendSysEx(SysExLength, MIDI6.getSysExArray(), true);
-      // MIDI7.sendSysEx(SysExLength, MIDI6.getSysExArray(), true);
-      MIDI8.sendSysEx(SysExLength, MIDI6.getSysExArray(), true);
-
-    }
-    activity = true;
-  }
-
-
-    if (MIDI7.read()) {
-    // get a MIDI IN1 (Serial) message
-    byte type = MIDI7.getType();
-    byte channel = MIDI7.getChannel();
-    byte data1 = MIDI7.getData1();
-    byte data2 = MIDI7.getData2();
-
-    // forward the message to USB MIDI virtual cable #0
-    if (type != midi::SystemExclusive) {
-      // Normal messages, simply give the data to the usbMIDI.send()
-      usbMIDI.send(type, data1, data2, channel, 0);
-      // MIDI1.send(type, data1, data2, channel);
-      // MIDI2.send(type, data1, data2, channel);
-      // MIDI3.send(type, data1, data2, channel);
-      // MIDI4.send(type, data1, data2, channel);
-      // MIDI5.send(type, data1, data2, channel);
-      // MIDI6.send(type, data1, data2, channel);
-      // MIDI7.send(type, data1, data2, channel);
-      MIDI8.send(type, data1, data2, channel);
-
-    } else {
-      // SysEx messages are special.  The message length is given in data1 & data2
-      unsigned int SysExLength = data1 + data2 * 256;
-      usbMIDI.sendSysEx(SysExLength, MIDI7.getSysExArray(), true, 0);
-      // MIDI1.sendSysEx(SysExLength, MIDI7.getSysExArray(), true);
-      // MIDI2.sendSysEx(SysExLength, MIDI7.getSysExArray(), true);
-      // MIDI3.sendSysEx(SysExLength, MIDI7.getSysExArray(), true);
-      // MIDI4.sendSysEx(SysExLength, MIDI7.getSysExArray(), true);
-      // MIDI5.sendSysEx(SysExLength, MIDI7.getSysExArray(), true);
-      // MIDI6.sendSysEx(SysExLength, MIDI7.getSysExArray(), true);
-      // MIDI7.sendSysEx(SysExLength, MIDI7.getSysExArray(), true);
-      MIDI8.sendSysEx(SysExLength, MIDI7.getSysExArray(), true);
-    }
-    activity = true;
-  }
-
-
-    if (MIDI8.read()) {
-    // get a MIDI IN1 (Serial) message
-    byte type = MIDI8.getType();
-    byte channel = MIDI8.getChannel();
-    byte data1 = MIDI8.getData1();
-    byte data2 = MIDI8.getData2();
-
-    // forward the message to USB MIDI virtual cable #0
-    if (type != midi::SystemExclusive) {
-      // Normal messages, simply give the data to the usbMIDI.send()
-      usbMIDI.send(type, data1, data2, channel, 0);
-      MIDI1.send(type, data1, data2, channel);
-      MIDI2.send(type, data1, data2, channel);
-      MIDI3.send(type, data1, data2, channel);
-      MIDI4.send(type, data1, data2, channel);
-      MIDI5.send(type, data1, data2, channel);
-      MIDI6.send(type, data1, data2, channel);
-      MIDI7.send(type, data1, data2, channel);
-      // MIDI8.send(type, data1, data2, channel);
-
-    } else {
-      // SysEx messages are special.  The message length is given in data1 & data2
-      unsigned int SysExLength = data1 + data2 * 256;
-      usbMIDI.sendSysEx(SysExLength, MIDI8.getSysExArray(), true, 0);
-      MIDI1.sendSysEx(SysExLength, MIDI8.getSysExArray(), true);
-      MIDI2.sendSysEx(SysExLength, MIDI8.getSysExArray(), true);
-      MIDI3.sendSysEx(SysExLength, MIDI8.getSysExArray(), true);
-      MIDI4.sendSysEx(SysExLength, MIDI8.getSysExArray(), true);
-      MIDI5.sendSysEx(SysExLength, MIDI8.getSysExArray(), true);
-      MIDI6.sendSysEx(SysExLength, MIDI8.getSysExArray(), true);
-      MIDI7.sendSysEx(SysExLength, MIDI8.getSysExArray(), true);
-      // MIDI8.sendSysEx(SysExLength, MIDI8.getSysExArray(), true);
-
-    }
-    activity = true;
-  }
-
-
-  // Next read messages arriving from the (up to) 10 USB devices plugged into the USB Host port
+  // secondary USB port (acting as host)
+  // could host up to 8 devices (connected through a USB hub)
   for (int port=0; port < 8; port++) {
     if (midilist[port]->read()) {
       uint8_t type =       midilist[port]->getType();
@@ -396,108 +236,49 @@ void loop() {
       const uint8_t *sys = midilist[port]->getSysExArray();
       // sendToComputer(type, data1, data2, channel, sys, 8 + port);
       sendOmni(type, data1, data2, channel, sys, 0);
+
       activity = true;
     }
   }
 
-
-
-
+  // main USB interface port
   if (usbMIDI.read()) {
-    // get the USB MIDI message, defined by these 5 numbers (except SysEX)
-    byte type = usbMIDI.getType();
+    byte type    = usbMIDI.getType();
     byte channel = usbMIDI.getChannel();
-    byte data1 = usbMIDI.getData1();
-    byte data2 = usbMIDI.getData2();
-    byte cable = usbMIDI.getCable();
+    byte data1   = usbMIDI.getData1();
+    byte data2   = usbMIDI.getData2();
+    byte cable   = usbMIDI.getCable();
 
-    // forward this message to 1 of the 3 Serial MIDI OUT ports
     if (type != usbMIDI.SystemExclusive) {
-      // Normal messages, first we must convert usbMIDI's type (an ordinary
-      // byte) to the MIDI library's special MidiType.
       midi::MidiType mtype = (midi::MidiType)type;
+      byte mappedChannel = channel;
 
-      MIDI1.send(mtype, data1, data2, channel);
-      MIDI2.send(mtype, data1, data2, channel);
-      MIDI3.send(mtype, data1, data2, channel);
-      MIDI4.send(mtype, data1, data2, channel);
-      MIDI5.send(mtype, data1, data2, channel);
-      MIDI6.send(mtype, data1, data2, channel);
-      MIDI7.send(mtype, data1, data2, channel);
-      MIDI8.send(mtype, data1, data2, channel);
+      for (int o=0 ; o < NB_MIDI ; o++) {
+        mappedChannel = channel;
 
-      // Then simply give the data to the MIDI library send()
-      // switch (cable) {
-      //   case 0:
-      //     MIDI1.send(mtype, data1, data2, channel);
-      //     break;
-      //   case 1:
-      //     MIDI2.send(mtype, data1, data2, channel);
-      //     break;
-      //   case 2:
-      //     MIDI3.send(mtype, data1, data2, channel);
-      //     break;
-      //   case 3:
-      //     MIDI4.send(mtype, data1, data2, channel);
-      //     break;
-      //   case 4:
-      //     MIDI5.send(mtype, data1, data2, channel);
-      //     break;
-      //   case 5:
-      //     MIDI6.send(mtype, data1, data2, channel);
-      //     break;
-      //   case 6:
-      //     MIDI7.send(mtype, data1, data2, channel);
-      //     break;
-      //   case 7:
-      //     MIDI8.send(mtype, data1, data2, channel);
-      //     break;
-      //   default: // cases 6-15
-      //     midilist[cable - 8]->send(type, data1, data2, channel);
-      // }
+        if (isLibrarian(o)) {
+          // -> be transparent
+        } else {
+          // -> filter/remap according to dest device (o)
+          if (channel == OMNI_ROUTE_CHANNEL
+              || channel == channelRemap[o][CH_M_EXPOSED]) {
+            mappedChannel = channelRemap[o][CH_M_DEVICE];
+          } else {
+            // filter out
+            continue;
+          }
+        }
 
+        m[o].send(mtype, data1, data2, mappedChannel);
+      }
     } else {
-      // SysEx messages are special.  The message length is given in data1 & data2
       unsigned int SysExLength = data1 + data2 * 256;
 
-      MIDI1.sendSysEx(SysExLength, usbMIDI.getSysExArray(), true);
-      MIDI2.sendSysEx(SysExLength, usbMIDI.getSysExArray(), true);
-      MIDI3.sendSysEx(SysExLength, usbMIDI.getSysExArray(), true);
-      MIDI4.sendSysEx(SysExLength, usbMIDI.getSysExArray(), true);
-      MIDI5.sendSysEx(SysExLength, usbMIDI.getSysExArray(), true);
-      MIDI6.sendSysEx(SysExLength, usbMIDI.getSysExArray(), true);
-      MIDI7.sendSysEx(SysExLength, usbMIDI.getSysExArray(), true);
-      MIDI8.sendSysEx(SysExLength, usbMIDI.getSysExArray(), true);
-
-      // switch (cable) {
-      //   case 0:
-      //     MIDI1.sendSysEx(SysExLength, usbMIDI.getSysExArray(), true);
-      //     break;
-      //   case 1:
-      //     MIDI2.sendSysEx(SysExLength, usbMIDI.getSysExArray(), true);
-      //     break;
-      //   case 2:
-      //     MIDI3.sendSysEx(SysExLength, usbMIDI.getSysExArray(), true);
-      //     break;
-      //   case 3:
-      //     MIDI4.sendSysEx(SysExLength, usbMIDI.getSysExArray(), true);
-      //     break;
-      //   case 4:
-      //     MIDI5.sendSysEx(SysExLength, usbMIDI.getSysExArray(), true);
-      //     break;
-      //   case 5:
-      //     MIDI6.sendSysEx(SysExLength, usbMIDI.getSysExArray(), true);
-      //     break;
-      //   case 6:
-      //     MIDI7.sendSysEx(SysExLength, usbMIDI.getSysExArray(), true);
-      //     break;
-      //   case 7:
-      //     MIDI8.sendSysEx(SysExLength, usbMIDI.getSysExArray(), true);
-      //     break;
-      //   default: // cases 6-15
-      //     midilist[cable - 8]->sendSysEx(SysExLength, usbMIDI.getSysExArray(), true);
-      // }
+      for (int o=0 ; o < NB_MIDI ; o++) {
+        m[o].sendSysEx(SysExLength, usbMIDI.getSysExArray(), true);
+      }
     }
+
     activity = true;
   }
 
@@ -512,6 +293,11 @@ void loop() {
 
 }
 
+
+
+// ------------------------------------------------------------------------
+// UTILS - MIDI
+
 void sendToComputer(byte type, byte data1, byte data2, byte channel, const uint8_t *sysexarray, byte cable)
 {
   if (type != midi::SystemExclusive) {
@@ -525,16 +311,16 @@ void sendToComputer(byte type, byte data1, byte data2, byte channel, const uint8
 void sendOmni(byte type, byte data1, byte data2, byte channel, const uint8_t *sysexarray, byte cable)
 {
   if (type != midi::SystemExclusive) {
+    midi::MidiType mtype = (midi::MidiType)type;
+
     usbMIDI.send(type, data1, data2, channel, cable);
-    MIDI1.send(type, data1, data2, channel);
-    MIDI2.send(type, data1, data2, channel);
-    MIDI3.send(type, data1, data2, channel);
-    MIDI4.send(type, data1, data2, channel);
-    MIDI5.send(type, data1, data2, channel);
-    MIDI6.send(type, data1, data2, channel);
-    MIDI7.send(type, data1, data2, channel);
-    MIDI8.send(type, data1, data2, channel);
+
+    for (int o=0 ; o < NB_MIDI ; o++) {
+      m[o].send(mtype, data1, data2, channel);
+    }
+
   } else {
+
     unsigned int SysExLength = data1 + data2 * 256;
     usbMIDI.sendSysEx(SysExLength, sysexarray, true, cable);
     MIDI8.sendSysEx(SysExLength, sysexarray, true);
